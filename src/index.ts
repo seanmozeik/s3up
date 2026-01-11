@@ -19,6 +19,11 @@ import fontPath from "../node_modules/figlet/fonts/ANSI Shadow.flf" with {
 
 const SECRETS_SERVICE = "com.r2up.cli";
 
+// Upload configuration
+const LARGE_FILE_THRESHOLD = 5 * 1024 * 1024; // 5MB - use streaming for files above this
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for multipart upload
+const DEFAULT_CONCURRENCY = 5; // Default number of parallel uploads
+
 const SECRETS = {
 	ACCESS_KEY_ID: "R2UP_ACCESS_KEY_ID",
 	SECRET_ACCESS_KEY: "R2UP_SECRET_ACCESS_KEY",
@@ -341,6 +346,114 @@ function formatBytes(bytes: number): string {
 	return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
+function formatProgress(bytesWritten: number, totalSize: number): string {
+	const percent = Math.round((bytesWritten / totalSize) * 100);
+	return `${percent}% (${formatBytes(bytesWritten)} / ${formatBytes(totalSize)})`;
+}
+
+interface UploadProgressCallback {
+	(bytesWritten: number, totalSize: number): void;
+}
+
+async function uploadFileWithProgress(
+	client: S3Client,
+	localPath: string,
+	remoteName: string,
+	onProgress: UploadProgressCallback,
+): Promise<void> {
+	const file = Bun.file(localPath);
+	const totalSize = file.size;
+
+	// For small files, use simple write (faster, no progress needed)
+	if (totalSize < LARGE_FILE_THRESHOLD) {
+		await client.write(remoteName, file);
+		onProgress(totalSize, totalSize);
+		return;
+	}
+
+	// For large files, use streaming with progress tracking
+	const s3file = client.file(remoteName);
+	const writer = s3file.writer({
+		partSize: CHUNK_SIZE,
+		queueSize: 10,
+		retry: 3,
+	});
+
+	const stream = file.stream();
+	let bytesWritten = 0;
+
+	for await (const chunk of stream) {
+		writer.write(chunk);
+		bytesWritten += chunk.length;
+		onProgress(bytesWritten, totalSize);
+	}
+
+	await writer.end();
+}
+
+// Concurrency-limited parallel execution
+async function runWithConcurrency<T, R>(
+	items: T[],
+	limit: number,
+	fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+	const results: R[] = new Array(items.length);
+	const executing = new Set<Promise<void>>();
+	let currentIndex = 0;
+
+	for (const item of items) {
+		const index = currentIndex++;
+		const promise = fn(item, index).then((result) => {
+			results[index] = result;
+			executing.delete(promise);
+		});
+		executing.add(promise);
+
+		if (executing.size >= limit) {
+			await Promise.race(executing);
+		}
+	}
+
+	await Promise.all(executing);
+	return results;
+}
+
+// Progress state for parallel uploads
+interface UploadProgress {
+	files: Map<
+		string,
+		{
+			bytesWritten: number;
+			totalSize: number;
+			status: "pending" | "uploading" | "done" | "error";
+		}
+	>;
+	completed: number;
+	total: number;
+}
+
+function renderProgress(progress: UploadProgress): string {
+	const lines: string[] = [];
+	const activeUploads = [...progress.files.entries()].filter(
+		([_, state]) => state.status === "uploading",
+	);
+
+	// Show overall progress
+	lines.push(
+		`Uploading ${progress.completed}/${progress.total} files complete`,
+	);
+
+	// Show active uploads with their progress
+	for (const [filename, state] of activeUploads) {
+		const percent = Math.round((state.bytesWritten / state.totalSize) * 100);
+		const progressBar =
+			state.totalSize >= LARGE_FILE_THRESHOLD ? ` ${percent}%` : "";
+		lines.push(`  → ${filename}${progressBar}`);
+	}
+
+	return lines.join("\n");
+}
+
 function displayResults(results: UploadOutcome[]): void {
 	const successes = results.filter((r): r is UploadResult => r.success);
 	const failures = results.filter((r): r is UploadError => !r.success);
@@ -374,7 +487,10 @@ function displayResults(results: UploadOutcome[]): void {
 // Upload Command
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function uploadFiles(filePaths: string[]): Promise<void> {
+async function uploadFiles(
+	filePaths: string[],
+	concurrency: number = DEFAULT_CONCURRENCY,
+): Promise<void> {
 	await showBanner();
 
 	// Load config
@@ -421,9 +537,13 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 
 	// Show what we're uploading
 	const totalSize = validFiles.reduce((sum, f) => sum + f.size, 0);
+	const parallelNote =
+		validFiles.length > 1 && concurrency > 1
+			? `, ${Math.min(concurrency, validFiles.length)} parallel`
+			: "";
 	p.intro(
 		theme.text(
-			`Uploading ${validFiles.length} file${validFiles.length > 1 ? "s" : ""} (${formatBytes(totalSize)})`,
+			`Uploading ${validFiles.length} file${validFiles.length > 1 ? "s" : ""} (${formatBytes(totalSize)}${parallelNote})`,
 		),
 	);
 
@@ -435,42 +555,80 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
 	});
 
-	// Upload files with progress
-	const results: UploadOutcome[] = [];
+	// Progress tracking
+	const progress: UploadProgress = {
+		files: new Map(),
+		completed: 0,
+		total: validFiles.length,
+	};
 
-	for (let i = 0; i < validFiles.length; i++) {
-		const file = validFiles[i];
-		const s = p.spinner();
-		s.start(
-			`[${i + 1}/${validFiles.length}] Uploading ${file.name} (${formatBytes(file.size)})`,
-		);
+	// Initialize progress state for all files
+	for (const file of validFiles) {
+		progress.files.set(file.name, {
+			bytesWritten: 0,
+			totalSize: file.size,
+			status: "pending",
+		});
+	}
+
+	// Single spinner for all uploads
+	const s = p.spinner();
+	s.start(renderProgress(progress));
+
+	// Upload function for each file
+	const uploadSingleFile = async (
+		file: { path: string; name: string; size: number },
+		_index: number,
+	): Promise<UploadOutcome> => {
+		const fileProgress = progress.files.get(file.name)!;
+		fileProgress.status = "uploading";
+		s.message(renderProgress(progress));
 
 		try {
-			// Read file and upload
-			const fileContent = Bun.file(file.path);
-			await client.write(file.name, fileContent);
+			await uploadFileWithProgress(
+				client,
+				file.path,
+				file.name,
+				(bytesWritten, _totalSize) => {
+					fileProgress.bytesWritten = bytesWritten;
+					s.message(renderProgress(progress));
+				},
+			);
 
 			const publicUrl = `${config.publicUrlBase}/${file.name}`;
+			fileProgress.status = "done";
+			progress.completed++;
+			s.message(renderProgress(progress));
 
-			s.stop(theme.success(`[${i + 1}/${validFiles.length}] ${file.name}`));
-
-			results.push({
+			return {
 				filename: file.name,
 				size: file.size,
 				publicUrl,
 				success: true,
-			});
+			};
 		} catch (err) {
-			s.stop(
-				theme.error(`[${i + 1}/${validFiles.length}] ${file.name} - Failed`),
-			);
-			results.push({
+			fileProgress.status = "error";
+			progress.completed++;
+			s.message(renderProgress(progress));
+
+			return {
 				filename: file.name,
 				error: err instanceof Error ? err.message : String(err),
 				success: false,
-			});
+			};
 		}
-	}
+	};
+
+	// Upload files in parallel with concurrency limit
+	const results = await runWithConcurrency(
+		validFiles,
+		concurrency,
+		uploadSingleFile,
+	);
+
+	s.stop(
+		theme.success(`Uploaded ${progress.completed}/${progress.total} files`),
+	);
 
 	console.log();
 	displayResults(results);
@@ -513,6 +671,17 @@ async function showHelp(): Promise<void> {
 	);
 	console.log(
 		`  ${theme.dim("r2up docs/report.pdf assets/*")}   Upload from paths`,
+	);
+	console.log();
+	console.log(theme.text("Auto-delete / TTL:"));
+	console.log(
+		`  ${theme.subtext("R2 supports automatic file deletion via Object Lifecycle rules.")}`,
+	);
+	console.log(
+		`  ${theme.subtext("Configure in Cloudflare Dashboard: R2 > [bucket] > Settings > Object lifecycle rules")}`,
+	);
+	console.log(
+		`  ${theme.link("https://developers.cloudflare.com/r2/buckets/object-lifecycles/")}`,
 	);
 	console.log();
 }
