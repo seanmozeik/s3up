@@ -1,0 +1,12 @@
+# r2up Build Configuration
+
+[release]
+# Build standalone binary for current platform
+bun build ./src/index.ts --compile --outfile r2up --minify
+rm -f ./.*bun-build
+
+# Install to local bin (creates ~/.local/bin if needed)
+mkdir -p ~/.local/bin
+mv r2up ~/.local/bin/r2up
+chmod +x ~/.local/bin/r2up
+
