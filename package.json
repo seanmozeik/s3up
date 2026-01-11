@@ -1,24 +1,24 @@
 {
-  "name": "r2up",
-  "version": "0.1.3",
-  "description": "Upload files to Cloudflare R2",
-  "type": "module",
-  "scripts": {
-    "dev": "bun run src/index.ts",
-    "build": "bun build ./src/index.ts --compile --outfile r2up --minify",
-    "install-local": "bun run build && mkdir -p ~/.local/bin && mv r2up ~/.local/bin/r2up && chmod +x ~/.local/bin/r2up"
-  },
-  "dependencies": {
-    "@clack/prompts": "^0.11.0",
-    "boxen": "^8.0.1",
-    "figlet": "^1.9.4",
-    "gradient-string": "^3.0.0",
-    "picocolors": "^1.1.1"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "@types/figlet": "^1.7.0",
-    "@types/gradient-string": "^1.1.6",
-    "typescript": "^5.9.3"
-  }
+	"name": "r2up",
+	"version": "0.1.3",
+	"description": "Upload files to Cloudflare R2",
+	"type": "module",
+	"scripts": {
+		"dev": "bun run src/index.ts",
+		"build": "bun build ./src/index.ts --compile --outfile r2up --minify",
+		"install-local": "bun run build && mkdir -p ~/.local/bin && mv r2up ~/.local/bin/r2up && chmod +x ~/.local/bin/r2up"
+	},
+	"dependencies": {
+		"@clack/prompts": "^0.11.0",
+		"boxen": "^8.0.1",
+		"figlet": "^1.9.4",
+		"gradient-string": "^3.0.0",
+		"picocolors": "^1.1.1"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"@types/figlet": "^1.7.0",
+		"@types/gradient-string": "^1.1.6",
+		"typescript": "^5.9.3"
+	}
 }
