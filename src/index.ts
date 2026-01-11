@@ -351,23 +351,25 @@ function formatProgress(bytesWritten: number, totalSize: number): string {
 	return `${percent}% (${formatBytes(bytesWritten)} / ${formatBytes(totalSize)})`;
 }
 
-interface UploadProgressCallback {
-	(bytesWritten: number, totalSize: number): void;
+interface UploadCallbacks {
+	onProgress: (bytesWritten: number, totalSize: number) => void;
+	onFinalizing?: () => void;
 }
 
 async function uploadFileWithProgress(
 	client: S3Client,
 	localPath: string,
 	remoteName: string,
-	onProgress: UploadProgressCallback,
+	callbacks: UploadCallbacks,
 ): Promise<void> {
 	const file = Bun.file(localPath);
 	const totalSize = file.size;
 
 	// For small files, use simple write (faster, no progress needed)
 	if (totalSize < LARGE_FILE_THRESHOLD) {
+		callbacks.onFinalizing?.();
 		await client.write(remoteName, file);
-		onProgress(totalSize, totalSize);
+		callbacks.onProgress(totalSize, totalSize);
 		return;
 	}
 
@@ -385,9 +387,10 @@ async function uploadFileWithProgress(
 	for await (const chunk of stream) {
 		writer.write(chunk);
 		bytesWritten += chunk.length;
-		onProgress(bytesWritten, totalSize);
+		callbacks.onProgress(bytesWritten, totalSize);
 	}
 
+	callbacks.onFinalizing?.();
 	await writer.end();
 }
 
@@ -419,13 +422,15 @@ async function runWithConcurrency<T, R>(
 }
 
 // Progress state for parallel uploads
+type FileStatus = "pending" | "uploading" | "finalizing" | "done" | "error";
+
 interface UploadProgress {
 	files: Map<
 		string,
 		{
 			bytesWritten: number;
 			totalSize: number;
-			status: "pending" | "uploading" | "done" | "error";
+			status: FileStatus;
 		}
 	>;
 	completed: number;
@@ -433,25 +438,32 @@ interface UploadProgress {
 }
 
 function renderProgress(progress: UploadProgress): string {
-	const lines: string[] = [];
 	const activeUploads = [...progress.files.entries()].filter(
-		([_, state]) => state.status === "uploading",
+		([_, state]) =>
+			state.status === "uploading" || state.status === "finalizing",
 	);
 
-	// Show overall progress
-	lines.push(
-		`Uploading ${progress.completed}/${progress.total} files complete`,
-	);
-
-	// Show active uploads with their progress
-	for (const [filename, state] of activeUploads) {
-		const percent = Math.round((state.bytesWritten / state.totalSize) * 100);
-		const progressBar =
-			state.totalSize >= LARGE_FILE_THRESHOLD ? ` ${percent}%` : "";
-		lines.push(`  → ${filename}${progressBar}`);
+	// Single line format for spinner compatibility
+	if (activeUploads.length === 0) {
+		return `Uploaded ${progress.completed}/${progress.total} files`;
 	}
 
-	return lines.join("\n");
+	const activeInfo = activeUploads
+		.map(([filename, state]) => {
+			if (state.status === "finalizing") {
+				return `${filename} (finalizing)`;
+			}
+			if (state.totalSize >= LARGE_FILE_THRESHOLD) {
+				const percent = Math.round(
+					(state.bytesWritten / state.totalSize) * 100,
+				);
+				return `${filename} ${percent}%`;
+			}
+			return filename;
+		})
+		.join(", ");
+
+	return `[${progress.completed}/${progress.total}] ${activeInfo}`;
 }
 
 function displayResults(results: UploadOutcome[]): void {
@@ -585,15 +597,16 @@ async function uploadFiles(
 		s.message(renderProgress(progress));
 
 		try {
-			await uploadFileWithProgress(
-				client,
-				file.path,
-				file.name,
-				(bytesWritten, _totalSize) => {
+			await uploadFileWithProgress(client, file.path, file.name, {
+				onProgress: (bytesWritten, _totalSize) => {
 					fileProgress.bytesWritten = bytesWritten;
 					s.message(renderProgress(progress));
 				},
-			);
+				onFinalizing: () => {
+					fileProgress.status = "finalizing";
+					s.message(renderProgress(progress));
+				},
+			});
 
 			const publicUrl = `${config.publicUrlBase}/${file.name}`;
 			fileProgress.status = "done";
