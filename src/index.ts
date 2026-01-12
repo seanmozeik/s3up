@@ -472,14 +472,6 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		),
 	);
 
-	// Create S3 client
-	const client = new S3Client({
-		accessKeyId: config.accessKeyId,
-		secretAccessKey: config.secretAccessKey,
-		bucket: config.bucket,
-		endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
-	});
-
 	// Progress tracking
 	const progress: UploadProgress = {
 		activeFiles: new Set(),
@@ -487,7 +479,6 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		total: validFiles.length,
 	};
 
-	// Single spinner for all uploads
 	const s = p.spinner();
 	s.start(renderProgress(progress));
 
@@ -502,7 +493,21 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 
 		try {
 			const fileContent = Bun.file(file.path);
-			await client.write(file.name, fileContent);
+			// Use fetch with s3:// URL for automatic multipart upload
+			const response = await fetch(`s3://${config.bucket}/${file.name}`, {
+				method: "PUT",
+				body: fileContent.stream(),
+				s3: {
+					accessKeyId: config.accessKeyId,
+					secretAccessKey: config.secretAccessKey,
+					endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+				},
+			});
+			if (!response.ok) {
+				throw new Error(
+					`Upload failed: ${response.status} ${response.statusText}`,
+				);
+			}
 
 			const publicUrl = `${config.publicUrlBase}/${file.name}`;
 			progress.activeFiles.delete(file.name);
@@ -528,7 +533,7 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		}
 	};
 
-	// Upload files in parallel with concurrency limit
+	// Upload files in parallel
 	const results = await runWithConcurrency(
 		validFiles,
 		DEFAULT_CONCURRENCY,
