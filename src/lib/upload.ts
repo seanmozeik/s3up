@@ -88,6 +88,9 @@ export async function uploadFile(
 		const response = await fetch(`s3://${config.bucket}/${file.name}`, {
 			method: "PUT",
 			body: fileContent.stream(),
+			headers: {
+				"Content-Disposition": "attachment",
+			},
 			s3: {
 				accessKeyId: config.accessKeyId,
 				secretAccessKey: config.secretAccessKey,
