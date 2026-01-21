@@ -1,287 +1,35 @@
 #!/usr/bin/env bun
 
 import * as p from "@clack/prompts";
-import { S3Client } from "bun";
 import boxen from "boxen";
-import figlet from "figlet";
-import gradient from "gradient-string";
 import path from "path";
 
-// Embed font file for Bun standalone executable
-// @ts-expect-error - Bun-specific import attribute
-import fontPath from "../node_modules/figlet/fonts/ANSI Shadow.flf" with {
-	type: "file",
-};
+// UI modules
+import { showBanner } from "./ui/banner.js";
+import { setup } from "./ui/setup.js";
+import { frappe, theme, boxColors } from "./ui/theme.js";
 
-// ─────────────────────────────────────────────────────────────────────────────
+// Lib modules
+import { copyToClipboard } from "./lib/clipboard.js";
+import {
+	deleteConfig,
+	loadConfig,
+	PROVIDERS,
+	type S3Config,
+} from "./lib/providers.js";
+import {
+	formatBytes,
+	renderProgress,
+	runWithConcurrency,
+	uploadFile,
+	type UploadOutcome,
+	type UploadProgress,
+	type UploadResult,
+	type UploadError,
+} from "./lib/upload.js";
+
 // Constants
-// ─────────────────────────────────────────────────────────────────────────────
-
-const SECRETS_SERVICE = "com.r2up.cli";
-
-// Upload configuration
-const DEFAULT_CONCURRENCY = 5; // Default number of parallel uploads
-
-const SECRETS = {
-	ACCESS_KEY_ID: "R2UP_ACCESS_KEY_ID",
-	SECRET_ACCESS_KEY: "R2UP_SECRET_ACCESS_KEY",
-	ACCOUNT_ID: "R2UP_ACCOUNT_ID",
-	BUCKET: "R2UP_BUCKET",
-	PUBLIC_URL_BASE: "R2UP_PUBLIC_URL_BASE",
-} as const;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Theme (Catppuccin Frappe)
-// ─────────────────────────────────────────────────────────────────────────────
-
-const palette = {
-	mauve: "#ca9ee6",
-	pink: "#f4b8e4",
-	flamingo: "#eebebe",
-	green: "#a6d189",
-	red: "#e78284",
-	yellow: "#e5c890",
-	surface2: "#626880",
-};
-
-const ansi = {
-	blue: 111,
-	green: 150,
-	mauve: 183,
-	peach: 216,
-	pink: 218,
-	red: 210,
-	surface2: 60,
-	subtext1: 146,
-	text: 189,
-	yellow: 223,
-};
-
-function ansiColor(code: number): (text: string) => string {
-	return (text: string) => `\x1b[38;5;${code}m${text}\x1b[0m`;
-}
-
-const theme = {
-	text: ansiColor(ansi.text),
-	subtext: ansiColor(ansi.subtext1),
-	dim: ansiColor(ansi.surface2),
-	success: ansiColor(ansi.green),
-	error: ansiColor(ansi.red),
-	warning: ansiColor(ansi.yellow),
-	info: ansiColor(ansi.blue),
-	accent: ansiColor(ansi.mauve),
-	link: ansiColor(ansi.peach),
-};
-
-const bannerGradient = gradient([
-	palette.mauve,
-	palette.pink,
-	palette.flamingo,
-]);
-
-const boxColors = {
-	primary: palette.mauve,
-	success: palette.green,
-	default: palette.surface2,
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Secret Management
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function getSecret(key: string): Promise<string | null> {
-	// Check environment variable first
-	const envValue = process.env[key];
-	if (envValue) return envValue;
-
-	// Try system credential store
-	try {
-		return await Bun.secrets.get({
-			name: key,
-			service: SECRETS_SERVICE,
-		});
-	} catch {
-		return null;
-	}
-}
-
-async function setSecret(key: string, value: string): Promise<void> {
-	try {
-		await Bun.secrets.set({
-			name: key,
-			service: SECRETS_SERVICE,
-			value,
-		});
-	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		if (process.platform === "linux" && msg.includes("libsecret")) {
-			throw new Error(
-				"libsecret not found. Install it with:\n" +
-					"  Ubuntu/Debian: sudo apt install libsecret-1-0\n" +
-					"  Fedora/RHEL:   sudo dnf install libsecret\n" +
-					"  Arch:          sudo pacman -S libsecret\n" +
-					"Or use environment variables instead.",
-			);
-		}
-		throw err;
-	}
-}
-
-async function deleteSecret(key: string): Promise<boolean> {
-	return await Bun.secrets.delete({
-		name: key,
-		service: SECRETS_SERVICE,
-	});
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Banner
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function showBanner(): Promise<void> {
-	const fontContent = await Bun.file(fontPath).text();
-	figlet.parseFont("ANSI Shadow", fontContent);
-
-	const banner = figlet.textSync("R2UP", {
-		font: "ANSI Shadow",
-		horizontalLayout: "default",
-	});
-
-	const indent = "  ";
-	const indentedBanner = banner
-		.split("\n")
-		.map((line) => indent + line)
-		.join("\n");
-
-	console.log();
-	console.log(bannerGradient(indentedBanner));
-	console.log();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Configuration
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface R2Config {
-	accessKeyId: string;
-	secretAccessKey: string;
-	accountId: string;
-	bucket: string;
-	publicUrlBase: string;
-}
-
-async function loadConfig(): Promise<R2Config | null> {
-	const [accessKeyId, secretAccessKey, accountId, bucket, publicUrlBase] =
-		await Promise.all([
-			getSecret(SECRETS.ACCESS_KEY_ID),
-			getSecret(SECRETS.SECRET_ACCESS_KEY),
-			getSecret(SECRETS.ACCOUNT_ID),
-			getSecret(SECRETS.BUCKET),
-			getSecret(SECRETS.PUBLIC_URL_BASE),
-		]);
-
-	if (
-		!accessKeyId ||
-		!secretAccessKey ||
-		!accountId ||
-		!bucket ||
-		!publicUrlBase
-	) {
-		return null;
-	}
-
-	return { accessKeyId, secretAccessKey, accountId, bucket, publicUrlBase };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Setup Command
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function setup(): Promise<void> {
-	await showBanner();
-	p.intro(theme.text("Configure Cloudflare R2 credentials"));
-
-	// Account ID
-	const accountId = await p.text({
-		message: "Cloudflare Account ID:",
-		validate: (v) => (v.trim() ? undefined : "Account ID is required"),
-	});
-	if (p.isCancel(accountId)) {
-		p.outro(theme.subtext("Cancelled"));
-		process.exit(0);
-	}
-
-	// Access Key ID
-	const accessKeyId = await p.text({
-		message: "R2 Access Key ID:",
-		validate: (v) => (v.trim() ? undefined : "Access Key ID is required"),
-	});
-	if (p.isCancel(accessKeyId)) {
-		p.outro(theme.subtext("Cancelled"));
-		process.exit(0);
-	}
-
-	// Secret Access Key
-	const secretAccessKey = await p.password({
-		message: "R2 Secret Access Key:",
-		validate: (v) => (v.trim() ? undefined : "Secret Access Key is required"),
-	});
-	if (p.isCancel(secretAccessKey)) {
-		p.outro(theme.subtext("Cancelled"));
-		process.exit(0);
-	}
-
-	// Bucket name
-	const bucket = await p.text({
-		message: "R2 Bucket name:",
-		validate: (v) => (v.trim() ? undefined : "Bucket name is required"),
-	});
-	if (p.isCancel(bucket)) {
-		p.outro(theme.subtext("Cancelled"));
-		process.exit(0);
-	}
-
-	// Public URL base
-	const publicUrlBase = await p.text({
-		message: "Public URL base (r2.dev or custom domain):",
-		validate: (v) => {
-			if (!v.trim()) return "Public URL base is required";
-			try {
-				new URL(v.trim());
-				return undefined;
-			} catch {
-				return "Must be a valid URL";
-			}
-		},
-	});
-	if (p.isCancel(publicUrlBase)) {
-		p.outro(theme.subtext("Cancelled"));
-		process.exit(0);
-	}
-
-	// Store secrets
-	const s = p.spinner();
-	s.start("Storing credentials...");
-
-	try {
-		await Promise.all([
-			setSecret(SECRETS.ACCOUNT_ID, accountId.trim()),
-			setSecret(SECRETS.ACCESS_KEY_ID, accessKeyId.trim()),
-			setSecret(SECRETS.SECRET_ACCESS_KEY, secretAccessKey.trim()),
-			setSecret(SECRETS.BUCKET, bucket.trim()),
-			setSecret(
-				SECRETS.PUBLIC_URL_BASE,
-				publicUrlBase.trim().replace(/\/$/, ""),
-			),
-		]);
-		s.stop(theme.success("Credentials stored securely"));
-		p.outro(theme.success("Setup complete! Run r2up <files...> to upload."));
-	} catch (err) {
-		s.stop(theme.error("Failed to store credentials"));
-		p.log.error(err instanceof Error ? err.message : String(err));
-		process.exit(1);
-	}
-}
+const DEFAULT_CONCURRENCY = 5;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Teardown Command
@@ -289,14 +37,14 @@ async function setup(): Promise<void> {
 
 async function teardown(): Promise<void> {
 	await showBanner();
-	p.intro(theme.text("Remove stored credentials"));
+	p.intro(frappe.text("Remove stored credentials"));
 
 	const confirm = await p.confirm({
-		message: "Remove all stored R2 credentials?",
+		message: "Remove all stored S3 credentials?",
 	});
 
 	if (p.isCancel(confirm) || !confirm) {
-		p.outro(theme.subtext("Cancelled"));
+		p.outro(frappe.subtext1("Cancelled"));
 		process.exit(0);
 	}
 
@@ -304,12 +52,9 @@ async function teardown(): Promise<void> {
 	s.start("Removing credentials...");
 
 	try {
-		const results = await Promise.all(
-			Object.values(SECRETS).map((key) => deleteSecret(key)),
-		);
-		const removed = results.filter(Boolean).length;
+		const removed = await deleteConfig();
 		s.stop(theme.success(`Removed ${removed} credential(s)`));
-		p.outro(theme.subtext("Done"));
+		p.outro(frappe.subtext1("Done"));
 	} catch (err) {
 		s.stop(theme.error("Failed to remove credentials"));
 		p.log.error(err instanceof Error ? err.message : String(err));
@@ -318,73 +63,8 @@ async function teardown(): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Upload Utilities
+// Display Results
 // ─────────────────────────────────────────────────────────────────────────────
-
-interface UploadResult {
-	filename: string;
-	size: number;
-	publicUrl: string;
-	success: true;
-}
-
-interface UploadError {
-	filename: string;
-	error: string;
-	success: false;
-}
-
-type UploadOutcome = UploadResult | UploadError;
-
-function formatBytes(bytes: number): string {
-	if (bytes === 0) return "0 B";
-	const k = 1024;
-	const sizes = ["B", "KB", "MB", "GB"];
-	const i = Math.floor(Math.log(bytes) / Math.log(k));
-	return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
-
-// Concurrency-limited parallel execution
-async function runWithConcurrency<T, R>(
-	items: T[],
-	limit: number,
-	fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-	const results: R[] = new Array(items.length);
-	const executing = new Set<Promise<void>>();
-	let currentIndex = 0;
-
-	for (const item of items) {
-		const index = currentIndex++;
-		const promise = fn(item, index).then((result) => {
-			results[index] = result;
-			executing.delete(promise);
-		});
-		executing.add(promise);
-
-		if (executing.size >= limit) {
-			await Promise.race(executing);
-		}
-	}
-
-	await Promise.all(executing);
-	return results;
-}
-
-// Progress state for parallel uploads
-interface UploadProgress {
-	activeFiles: Set<string>;
-	completed: number;
-	total: number;
-}
-
-function renderProgress(progress: UploadProgress): string {
-	if (progress.activeFiles.size === 0) {
-		return `Uploaded ${progress.completed}/${progress.total} files`;
-	}
-	const active = [...progress.activeFiles].join(", ");
-	return `[${progress.completed}/${progress.total}] ${active}`;
-}
 
 function displayResults(results: UploadOutcome[]): void {
 	const successes = results.filter((r): r is UploadResult => r.success);
@@ -394,7 +74,7 @@ function displayResults(results: UploadOutcome[]): void {
 		const content = successes
 			.map(
 				(r) =>
-					`${theme.success("✓")} ${theme.text(r.filename)} ${theme.dim(`(${formatBytes(r.size)})`)}\n  ${theme.link(r.publicUrl)}`,
+					`${theme.success("✓")} ${frappe.text(r.filename)} ${theme.dim(`(${formatBytes(r.size)})`)}\n  ${theme.link(r.publicUrl)}`,
 			)
 			.join("\n\n");
 
@@ -420,14 +100,15 @@ function displayResults(results: UploadOutcome[]): void {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function uploadFiles(filePaths: string[]): Promise<void> {
-	await showBanner();
-
-	// Load config
+	// Load config first (before banner for fire-and-forget)
 	const config = await loadConfig();
 	if (!config) {
-		p.log.error("R2 not configured. Run: r2up setup");
+		await showBanner();
+		p.log.error("S3 not configured. Run: s3up setup");
 		process.exit(1);
 	}
+
+	const providerInfo = PROVIDERS[config.provider];
 
 	// Validate files exist
 	const validFiles: { path: string; name: string; size: number }[] = [];
@@ -452,6 +133,34 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		}
 	}
 
+	// Fire off uploads immediately (fire-and-forget start)
+	const progress: UploadProgress = {
+		activeFiles: new Set(),
+		completed: 0,
+		total: validFiles.length,
+	};
+
+	let spinner: ReturnType<typeof p.spinner> | null = null;
+
+	const uploadPromise =
+		validFiles.length > 0
+			? runWithConcurrency(validFiles, DEFAULT_CONCURRENCY, async (file) => {
+					progress.activeFiles.add(file.name);
+					spinner?.message(renderProgress(progress));
+
+					const result = await uploadFile(file, config);
+
+					progress.activeFiles.delete(file.name);
+					progress.completed++;
+					spinner?.message(renderProgress(progress));
+
+					return result;
+				})
+			: Promise.resolve([]);
+
+	// Show banner while uploads already running
+	await showBanner();
+
 	// Report invalid files
 	if (invalidFiles.length > 0) {
 		for (const f of invalidFiles) {
@@ -464,88 +173,41 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		process.exit(1);
 	}
 
-	// Show what we're uploading
+	// Show upload progress
 	const totalSize = validFiles.reduce((sum, f) => sum + f.size, 0);
 	p.intro(
-		theme.text(
-			`Uploading ${validFiles.length} file${validFiles.length > 1 ? "s" : ""} (${formatBytes(totalSize)})`,
+		frappe.text(
+			`Uploading ${validFiles.length} file${validFiles.length > 1 ? "s" : ""} to ${providerInfo.name} (${formatBytes(totalSize)})`,
 		),
 	);
 
-	// Progress tracking
-	const progress: UploadProgress = {
-		activeFiles: new Set(),
-		completed: 0,
-		total: validFiles.length,
-	};
+	spinner = p.spinner();
+	spinner.start(renderProgress(progress));
 
-	const s = p.spinner();
-	s.start(renderProgress(progress));
+	// Wait for uploads to complete
+	const results = await uploadPromise;
 
-	// Upload function for each file
-	const uploadSingleFile = async (file: {
-		path: string;
-		name: string;
-		size: number;
-	}): Promise<UploadOutcome> => {
-		progress.activeFiles.add(file.name);
-		s.message(renderProgress(progress));
-
-		try {
-			const fileContent = Bun.file(file.path);
-			// Use fetch with s3:// URL for automatic multipart upload
-			const response = await fetch(`s3://${config.bucket}/${file.name}`, {
-				method: "PUT",
-				body: fileContent.stream(),
-				s3: {
-					accessKeyId: config.accessKeyId,
-					secretAccessKey: config.secretAccessKey,
-					endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
-				},
-			});
-			if (!response.ok) {
-				throw new Error(
-					`Upload failed: ${response.status} ${response.statusText}`,
-				);
-			}
-
-			const publicUrl = `${config.publicUrlBase}/${file.name}`;
-			progress.activeFiles.delete(file.name);
-			progress.completed++;
-			s.message(renderProgress(progress));
-
-			return {
-				filename: file.name,
-				size: file.size,
-				publicUrl,
-				success: true,
-			};
-		} catch (err) {
-			progress.activeFiles.delete(file.name);
-			progress.completed++;
-			s.message(renderProgress(progress));
-
-			return {
-				filename: file.name,
-				error: err instanceof Error ? err.message : String(err),
-				success: false,
-			};
-		}
-	};
-
-	// Upload files in parallel
-	const results = await runWithConcurrency(
-		validFiles,
-		DEFAULT_CONCURRENCY,
-		uploadSingleFile,
-	);
-
-	s.stop(
+	spinner.stop(
 		theme.success(`Uploaded ${progress.completed}/${progress.total} files`),
 	);
 
 	console.log();
 	displayResults(results);
+
+	// Copy URLs to clipboard
+	const urls = results
+		.filter((r): r is UploadResult => r.success)
+		.map((r) => r.publicUrl);
+	if (urls.length > 0) {
+		const copied = await copyToClipboard(urls.join("\n"));
+		if (copied) {
+			p.log.success(
+				urls.length === 1
+					? "Copied URL to clipboard"
+					: `Copied ${urls.length} URLs to clipboard`,
+			);
+		}
+	}
 
 	const successCount = results.filter((r) => r.success).length;
 	const failCount = results.filter((r) => !r.success).length;
@@ -567,35 +229,29 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 
 async function showHelp(): Promise<void> {
 	await showBanner();
-	console.log(theme.text("Usage:"));
+	console.log(frappe.text("Usage:"));
 	console.log(
-		`  ${theme.accent("r2up setup")}         Configure R2 credentials`,
+		`  ${theme.accent("s3up setup")}         Configure S3 credentials`,
 	);
 	console.log(
-		`  ${theme.accent("r2up teardown")}      Remove stored credentials`,
+		`  ${theme.accent("s3up teardown")}      Remove stored credentials`,
 	);
-	console.log(`  ${theme.accent("r2up <files...>")}    Upload files to R2`);
+	console.log(`  ${theme.accent("s3up <files...>")}    Upload files to S3`);
 	console.log();
-	console.log(theme.text("Examples:"));
-	console.log(
-		`  ${theme.dim("r2up image.png")}                  Upload single file`,
-	);
-	console.log(
-		`  ${theme.dim("r2up *.png")}                      Upload multiple files`,
-	);
-	console.log(
-		`  ${theme.dim("r2up docs/report.pdf assets/*")}   Upload from paths`,
-	);
+	console.log(frappe.text("Supported providers:"));
+	for (const [key, info] of Object.entries(PROVIDERS)) {
+		console.log(`  ${theme.dim(key.padEnd(12))} ${frappe.subtext1(info.name)}`);
+	}
 	console.log();
-	console.log(theme.text("Auto-delete / TTL:"));
+	console.log(frappe.text("Examples:"));
 	console.log(
-		`  ${theme.subtext("R2 supports automatic file deletion via Object Lifecycle rules.")}`,
+		`  ${theme.dim("s3up image.png")}                  Upload single file`,
 	);
 	console.log(
-		`  ${theme.subtext("Configure in Cloudflare Dashboard: R2 > [bucket] > Settings > Object lifecycle rules")}`,
+		`  ${theme.dim("s3up *.png")}                      Upload multiple files`,
 	);
 	console.log(
-		`  ${theme.link("https://developers.cloudflare.com/r2/buckets/object-lifecycles/")}`,
+		`  ${theme.dim("s3up docs/report.pdf assets/*")}   Upload from paths`,
 	);
 	console.log();
 }
@@ -615,7 +271,6 @@ async function main() {
 	} else if (command === "--help" || command === "-h" || !command) {
 		await showHelp();
 	} else {
-		// Treat all args as file paths
 		await uploadFiles(args);
 	}
 }

@@ -1,12 +1,40 @@
-# r2up Build Configuration
+# s3up Release Configuration
 
 [release]
-# Build standalone binary for current platform
-bun build ./src/index.ts --compile --outfile r2up --minify
+# Clean and create dist directory
+rm -rf dist && mkdir -p dist
+
+# Build for all platforms
+bun build ./src/index.ts --compile --target=bun-darwin-arm64 --outfile dist/s3up-darwin-arm64 --minify
+bun build ./src/index.ts --compile --target=bun-darwin-x64 --outfile dist/s3up-darwin-x64 --minify
+bun build ./src/index.ts --compile --target=bun-linux-x64 --outfile dist/s3up-linux-x64 --minify
+bun build ./src/index.ts --compile --target=bun-linux-arm64 --outfile dist/s3up-linux-arm64 --minify
+
+# Clean up bun build artifacts
 rm -f ./.*bun-build
 
-# Install to local bin (creates ~/.local/bin if needed)
-mkdir -p ~/.local/bin
-mv r2up ~/.local/bin/r2up
-chmod +x ~/.local/bin/r2up
+# Create tar.gz archives for Unix platforms
+cd dist && for f in s3up-darwin-* s3up-linux-*; do [ -f "$f" ] && tar -czvf "${f}.tar.gz" "$f" && rm "$f"; done
 
+# Generate checksums
+bun -e "import{readdir}from'fs/promises';for(const f of(await readdir('dist')).filter(f=>f.endsWith('.tar.gz'))){console.log(new Bun.CryptoHasher('sha256').update(await Bun.file('dist/'+f).arrayBuffer()).digest('hex')+'  '+f)}" > dist/checksums.txt && cat dist/checksums.txt
+
+[publish]
+# Create GitHub release with binaries
+gh release create "v$(bun -p "require('./package.json').version")" dist/*.tar.gz dist/checksums.txt --title "v$(bun -p "require('./package.json').version")" --generate-notes
+
+# Update Homebrew formula with new version and SHA256 checksums
+VERSION=$(bun -p "require('./package.json').version") && \
+SHA_DARWIN_ARM64=$(bun -e "console.log(new Bun.CryptoHasher('sha256').update(await Bun.file('dist/s3up-darwin-arm64.tar.gz').arrayBuffer()).digest('hex'))") && \
+SHA_DARWIN_X64=$(bun -e "console.log(new Bun.CryptoHasher('sha256').update(await Bun.file('dist/s3up-darwin-x64.tar.gz').arrayBuffer()).digest('hex'))") && \
+SHA_LINUX_ARM64=$(bun -e "console.log(new Bun.CryptoHasher('sha256').update(await Bun.file('dist/s3up-linux-arm64.tar.gz').arrayBuffer()).digest('hex'))") && \
+SHA_LINUX_X64=$(bun -e "console.log(new Bun.CryptoHasher('sha256').update(await Bun.file('dist/s3up-linux-x64.tar.gz').arrayBuffer()).digest('hex'))") && \
+sed -i '' "s/version \".*\"/version \"$VERSION\"/" Formula/s3up.rb && \
+awk -v da="$SHA_DARWIN_ARM64" -v dx="$SHA_DARWIN_X64" -v la="$SHA_LINUX_ARM64" -v lx="$SHA_LINUX_X64" '/darwin-arm64\.tar\.gz/{found="da"} /darwin-x64\.tar\.gz/{found="dx"} /linux-arm64\.tar\.gz/{found="la"} /linux-x64\.tar\.gz/{found="lx"} /sha256/{if(found=="da"){sub(/sha256 ".*"/, "sha256 \""da"\"")} else if(found=="dx"){sub(/sha256 ".*"/, "sha256 \""dx"\"")} else if(found=="la"){sub(/sha256 ".*"/, "sha256 \""la"\"")} else if(found=="lx"){sub(/sha256 ".*"/, "sha256 \""lx"\"")}} {print}' Formula/s3up.rb > /tmp/s3up.rb && mv /tmp/s3up.rb Formula/s3up.rb
+
+# Copy formula to tap and commit
+cp Formula/s3up.rb ../tap/Formula/s3up.rb && \
+cd ../tap && \
+git add Formula/s3up.rb && \
+git commit -m "s3up $(bun -p "require('$OLDPWD/package.json').version")" && \
+git push
