@@ -39,6 +39,7 @@ export async function showBanner(): Promise<void> {
 		.join("\n");
 
 	console.log();
+	console.log();
 	console.log(bannerGradient(indentedBanner));
 	console.log();
 }
