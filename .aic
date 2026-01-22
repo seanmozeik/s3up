@@ -21,7 +21,7 @@ bun -e "import{readdir}from'fs/promises';for(const f of(await readdir('dist')).f
 
 [publish]
 # Create GitHub release with binaries
-gh release create "v$(bun -p "require('./package.json').version")" dist/*.tar.gz dist/checksums.txt --title "v$(bun -p "require('./package.json').version")" --generate-notes
+gh release create "v$(bun -p "require('./package.json').version")" dist/*.tar.gz dist/checksums.txt --title "v$(bun -p "require('./package.json').version")" --notes "$(aic changelog-latest)"
 
 # Update Homebrew formula with new version and SHA256 checksums
 VERSION=$(bun -p "require('./package.json').version") && \

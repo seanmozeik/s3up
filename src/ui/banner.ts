@@ -3,7 +3,7 @@ import figlet from "figlet";
 import gradient from "gradient-string";
 // Embed font file for Bun standalone executable
 // @ts-expect-error - Bun-specific import attribute
-import fontPath from "../../node_modules/figlet/fonts/ANSI Shadow.flf" with {
+import fontPath from "../../node_modules/figlet/fonts/Slant.flf" with {
 	type: "file",
 };
 import { gradientColors } from "./theme.js";
@@ -17,7 +17,7 @@ let fontLoaded = false;
 async function ensureFontLoaded(): Promise<void> {
 	if (fontLoaded) return;
 	const fontContent = await Bun.file(fontPath).text();
-	figlet.parseFont("ANSI Shadow", fontContent);
+	figlet.parseFont("Slant", fontContent);
 	fontLoaded = true;
 }
 
@@ -27,8 +27,8 @@ async function ensureFontLoaded(): Promise<void> {
 export async function showBanner(): Promise<void> {
 	await ensureFontLoaded();
 
-	const banner = figlet.textSync("S3UP", {
-		font: "ANSI Shadow",
+	const banner = figlet.textSync("s3up", {
+		font: "Slant",
 		horizontalLayout: "default",
 	});
 
@@ -39,7 +39,6 @@ export async function showBanner(): Promise<void> {
 		.join("\n");
 
 	console.log();
-	console.log();
-	console.log(bannerGradient(indentedBanner));
+	console.log("\n" + bannerGradient(indentedBanner) + "\n");
 	console.log();
 }

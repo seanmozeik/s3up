@@ -3,6 +3,7 @@
 import * as p from "@clack/prompts";
 import boxen from "boxen";
 import path from "path";
+import pkg from "../package.json" with { type: "json" };
 
 // UI modules
 import { showBanner } from "./ui/banner.js";
@@ -27,9 +28,52 @@ import {
 	type UploadResult,
 	type UploadError,
 } from "./lib/upload.js";
+import {
+	uploadMultipart,
+	checkResumableUpload,
+	cleanupExistingUpload,
+	type MultipartOptions,
+} from "./lib/multipart";
 
 // Constants
-const DEFAULT_CONCURRENCY = 5;
+const MULTIPART_THRESHOLD = 100 * 1024 * 1024; // 100MB
+
+// Speed presets
+export const SPEED_PRESETS = {
+	fast: { chunkSize: 5 * 1024 * 1024, connections: 16 },
+	default: { chunkSize: 25 * 1024 * 1024, connections: 8 },
+	slow: { chunkSize: 50 * 1024 * 1024, connections: 4 },
+} as const;
+
+export type SpeedPreset = keyof typeof SPEED_PRESETS;
+
+export interface UploadOptions {
+	chunkSize: number;
+	connections: number;
+}
+
+function parseFlags(args: string[]): {
+	flags: { fast: boolean; slow: boolean; help: boolean; version: boolean };
+	files: string[];
+} {
+	const flags = {
+		fast: args.includes("-f") || args.includes("--fast"),
+		slow: args.includes("-s") || args.includes("--slow"),
+		help: args.includes("-h") || args.includes("--help"),
+		version: args.includes("-v") || args.includes("--version"),
+	};
+	const files = args.filter((a) => !a.startsWith("-"));
+	return { flags, files };
+}
+
+function getUploadOptions(flags: {
+	fast: boolean;
+	slow: boolean;
+}): UploadOptions {
+	if (flags.fast) return SPEED_PRESETS.fast;
+	if (flags.slow) return SPEED_PRESETS.slow;
+	return SPEED_PRESETS.default;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Teardown Command
@@ -99,7 +143,10 @@ function displayResults(results: UploadOutcome[]): void {
 // Upload Command
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function uploadFiles(filePaths: string[]): Promise<void> {
+async function uploadFiles(
+	filePaths: string[],
+	options: UploadOptions,
+): Promise<void> {
 	// Load config first (before banner for fire-and-forget)
 	const config = await loadConfig();
 	if (!config) {
@@ -133,32 +180,7 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		}
 	}
 
-	// Fire off uploads immediately (fire-and-forget start)
-	const progress: UploadProgress = {
-		activeFiles: new Set(),
-		completed: 0,
-		total: validFiles.length,
-	};
-
-	let spinner: ReturnType<typeof p.spinner> | null = null;
-
-	const uploadPromise =
-		validFiles.length > 0
-			? runWithConcurrency(validFiles, DEFAULT_CONCURRENCY, async (file) => {
-					progress.activeFiles.add(file.name);
-					spinner?.message(renderProgress(progress));
-
-					const result = await uploadFile(file, config);
-
-					progress.activeFiles.delete(file.name);
-					progress.completed++;
-					spinner?.message(renderProgress(progress));
-
-					return result;
-				})
-			: Promise.resolve([]);
-
-	// Show banner while uploads already running
+	// Show banner
 	await showBanner();
 
 	// Report invalid files
@@ -173,7 +195,10 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		process.exit(1);
 	}
 
-	// Show upload progress
+	// Separate large and small files
+	const largeFiles = validFiles.filter((f) => f.size >= MULTIPART_THRESHOLD);
+	const smallFiles = validFiles.filter((f) => f.size < MULTIPART_THRESHOLD);
+
 	const totalSize = validFiles.reduce((sum, f) => sum + f.size, 0);
 	p.intro(
 		frappe.text(
@@ -181,15 +206,97 @@ async function uploadFiles(filePaths: string[]): Promise<void> {
 		),
 	);
 
-	spinner = p.spinner();
-	spinner.start(renderProgress(progress));
+	const results: UploadOutcome[] = [];
 
-	// Wait for uploads to complete
-	const results = await uploadPromise;
+	// Handle large files first (one at a time for clear progress)
+	for (const file of largeFiles) {
+		// Check for resumable upload
+		const { canResume, percentComplete } = await checkResumableUpload(
+			file.path,
+		);
 
-	spinner.stop(
-		theme.success(`Uploaded ${progress.completed}/${progress.total} files`),
-	);
+		if (canResume) {
+			const resume = await p.confirm({
+				message: `Resume incomplete upload of ${file.name}? (${percentComplete}% done)`,
+			});
+
+			if (p.isCancel(resume)) {
+				p.outro(frappe.subtext1("Cancelled"));
+				process.exit(0);
+			}
+
+			if (!resume) {
+				// User chose to start fresh
+				await cleanupExistingUpload(file.path, config);
+			}
+		}
+
+		console.log(
+			frappe.text(`\nUploading ${file.name} (${formatBytes(file.size)})...`),
+		);
+
+		const multipartOptions: MultipartOptions = {
+			chunkSize: options.chunkSize,
+			connections: options.connections,
+		};
+
+		const result = await uploadMultipart(
+			file.path,
+			config,
+			file.name,
+			multipartOptions,
+		);
+
+		if (result.success) {
+			results.push({
+				filename: file.name,
+				size: file.size,
+				publicUrl: result.publicUrl,
+				success: true,
+			});
+		} else {
+			results.push({
+				filename: file.name,
+				error: result.error,
+				success: false,
+			});
+		}
+	}
+
+	// Handle small files (concurrent, existing behavior)
+	if (smallFiles.length > 0) {
+		const progress: UploadProgress = {
+			activeFiles: new Set(),
+			completed: 0,
+			total: smallFiles.length,
+		};
+
+		const spinner = p.spinner();
+		spinner.start(renderProgress(progress));
+
+		const smallResults = await runWithConcurrency(
+			smallFiles,
+			options.connections,
+			async (file) => {
+				progress.activeFiles.add(file.name);
+				spinner.message(renderProgress(progress));
+
+				const result = await uploadFile(file, config);
+
+				progress.activeFiles.delete(file.name);
+				progress.completed++;
+				spinner.message(renderProgress(progress));
+
+				return result;
+			},
+		);
+
+		spinner.stop(
+			theme.success(`Uploaded ${progress.completed}/${progress.total} files`),
+		);
+
+		results.push(...smallResults);
+	}
 
 	console.log();
 	displayResults(results);
@@ -231,27 +338,41 @@ async function showHelp(): Promise<void> {
 	await showBanner();
 	console.log(frappe.text("Usage:"));
 	console.log(
-		`  ${theme.accent("s3up setup")}         Configure S3 credentials`,
+		`  ${theme.accent("s3up")} ${theme.dim("[options]")} ${frappe.text("<files...>")}    Upload files`,
 	);
 	console.log(
-		`  ${theme.accent("s3up teardown")}      Remove stored credentials`,
+		`  ${theme.accent("s3up setup")}                        Configure credentials`,
 	);
-	console.log(`  ${theme.accent("s3up <files...>")}    Upload files to S3`);
+	console.log(
+		`  ${theme.accent("s3up teardown")}                     Remove credentials`,
+	);
 	console.log();
-	console.log(frappe.text("Supported providers:"));
-	for (const [key, info] of Object.entries(PROVIDERS)) {
-		console.log(`  ${theme.dim(key.padEnd(12))} ${frappe.subtext1(info.name)}`);
-	}
+	console.log(frappe.text("Options:"));
+	console.log(
+		`  ${theme.accent("-f, --fast")}     5MB chunks, 16 connections (fast network)`,
+	);
+	console.log(
+		`  ${theme.accent("-s, --slow")}     50MB chunks, 4 connections (unstable network)`,
+	);
+	console.log(`  ${theme.accent("-h, --help")}     Show this help message`);
+	console.log(`  ${theme.accent("-v, --version")}  Show version number`);
 	console.log();
 	console.log(frappe.text("Examples:"));
 	console.log(
-		`  ${theme.dim("s3up image.png")}                  Upload single file`,
+		`  ${theme.dim("s3up image.png")}              Upload single file`,
 	);
 	console.log(
-		`  ${theme.dim("s3up *.png")}                      Upload multiple files`,
+		`  ${theme.dim("s3up *.png")}                  Upload multiple files`,
 	);
 	console.log(
-		`  ${theme.dim("s3up docs/report.pdf assets/*")}   Upload from paths`,
+		`  ${theme.dim("s3up video.mp4 -f")}           Upload large file (fast mode)`,
+	);
+	console.log(
+		`  ${theme.dim("s3up backup.tar.gz -s")}       Upload on slow connection`,
+	);
+	console.log();
+	console.log(
+		frappe.subtext0("Files ≥100MB automatically use chunked parallel upload."),
 	);
 	console.log();
 }
@@ -264,14 +385,28 @@ async function main() {
 	const args = Bun.argv.slice(2);
 	const command = args[0];
 
+	// Handle --version anywhere
+	if (args.includes("-v") || args.includes("--version")) {
+		console.log(`s3up v${pkg.version}`);
+		process.exit(0);
+	}
+
+	// Handle --help anywhere
+	if (args.includes("-h") || args.includes("--help")) {
+		await showHelp();
+		process.exit(0);
+	}
+
 	if (command === "setup") {
 		await setup();
 	} else if (command === "teardown") {
 		await teardown();
-	} else if (command === "--help" || command === "-h" || !command) {
+	} else if (!command) {
 		await showHelp();
 	} else {
-		await uploadFiles(args);
+		const { flags, files } = parseFlags(args);
+		const options = getUploadOptions(flags);
+		await uploadFiles(files, options);
 	}
 }
 
