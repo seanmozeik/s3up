@@ -46,29 +46,39 @@ export function updateProgress(
 	state.completedParts++;
 	state.bytesUploaded += bytesUploaded;
 
-	// Add sample for speed calculation (keep last 3 seconds)
+	// Add sample for speed calculation (keep last 30 seconds for slow uploads)
 	const now = Date.now();
 	state.recentSamples.push({ time: now, bytes: state.bytesUploaded });
 
-	// Remove samples older than 3 seconds
-	const cutoff = now - 3000;
+	// Remove samples older than 30 seconds
+	const cutoff = now - 30000;
 	state.recentSamples = state.recentSamples.filter((s) => s.time >= cutoff);
 }
 
 /**
  * Calculate transfer speed (bytes per second)
+ * Uses overall average if recent samples insufficient
  */
 function calculateSpeed(state: ProgressState): number {
-	if (state.recentSamples.length < 2) return 0;
+	// Try recent samples first
+	if (state.recentSamples.length >= 2) {
+		const oldest = state.recentSamples[0];
+		const newest = state.recentSamples[state.recentSamples.length - 1];
 
-	const oldest = state.recentSamples[0];
-	const newest = state.recentSamples[state.recentSamples.length - 1];
+		const timeDiff = (newest.time - oldest.time) / 1000;
+		if (timeDiff > 0) {
+			const bytesDiff = newest.bytes - oldest.bytes;
+			return bytesDiff / timeDiff;
+		}
+	}
 
-	const timeDiff = (newest.time - oldest.time) / 1000; // seconds
-	if (timeDiff === 0) return 0;
+	// Fall back to overall average speed
+	const elapsed = (Date.now() - state.startTime) / 1000;
+	if (elapsed > 0 && state.bytesUploaded > 0) {
+		return state.bytesUploaded / elapsed;
+	}
 
-	const bytesDiff = newest.bytes - oldest.bytes;
-	return bytesDiff / timeDiff;
+	return 0;
 }
 
 /**

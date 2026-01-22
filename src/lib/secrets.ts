@@ -1,54 +1,52 @@
 // src/lib/secrets.ts
 
 const SECRETS_SERVICE = "com.s3up.cli";
+const CONFIG_KEY = "S3UP_CONFIG";
 
 // In-memory cache to avoid multiple keychain prompts per process
-const secretsCache = new Map<string, string | null>();
+let configCache: string | null | undefined = undefined;
 
 /**
- * Get secret from environment or system credential store
- * Uses Bun.secrets for cross-platform support:
- * - macOS: Keychain
- * - Linux: libsecret (GNOME Keyring, KWallet)
- * - Windows: Credential Manager
+ * Get the full config JSON from keychain (single prompt)
  */
-export async function getSecret(key: string): Promise<string | null> {
-	// 1. Check cache first (avoids multiple keychain prompts)
-	if (secretsCache.has(key)) {
-		return secretsCache.get(key) ?? null;
+export async function getConfigSecret(): Promise<string | null> {
+	// Check cache first
+	if (configCache !== undefined) {
+		return configCache;
 	}
 
-	// 2. Check environment variable
-	const envValue = process.env[key];
+	// Check environment variable
+	const envValue = process.env[CONFIG_KEY];
 	if (envValue) {
+		configCache = envValue;
 		return envValue;
 	}
 
-	// 3. Try system credential store via Bun.secrets
+	// Try system credential store via Bun.secrets
 	try {
 		const value = await Bun.secrets.get({
-			name: key,
+			name: CONFIG_KEY,
 			service: SECRETS_SERVICE,
 		});
-		secretsCache.set(key, value);
+		configCache = value;
 		return value;
 	} catch {
-		secretsCache.set(key, null);
+		configCache = null;
 		return null;
 	}
 }
 
 /**
- * Store secret in system credential store
+ * Store config JSON in system credential store
  */
-export async function setSecret(key: string, value: string): Promise<void> {
+export async function setConfigSecret(value: string): Promise<void> {
 	try {
 		await Bun.secrets.set({
-			name: key,
+			name: CONFIG_KEY,
 			service: SECRETS_SERVICE,
 			value,
 		});
-		secretsCache.set(key, value);
+		configCache = value;
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		if (process.platform === "linux" && msg.includes("libsecret")) {
@@ -65,13 +63,12 @@ export async function setSecret(key: string, value: string): Promise<void> {
 }
 
 /**
- * Delete secret from system credential store
- * Returns true if deleted, false if not found
+ * Delete config from system credential store
  */
-export async function deleteSecret(key: string): Promise<boolean> {
-	secretsCache.delete(key);
+export async function deleteConfigSecret(): Promise<boolean> {
+	configCache = undefined;
 	return await Bun.secrets.delete({
-		name: key,
+		name: CONFIG_KEY,
 		service: SECRETS_SERVICE,
 	});
 }

@@ -1,5 +1,9 @@
 // src/lib/providers.ts
-import { getSecret, setSecret, deleteSecret } from "./secrets.js";
+import {
+	getConfigSecret,
+	setConfigSecret,
+	deleteConfigSecret,
+} from "./secrets.js";
 
 export type Provider = "aws" | "r2" | "digitalocean" | "backblaze" | "custom";
 
@@ -77,20 +81,6 @@ export const PROVIDERS: Record<Provider, ProviderInfo> = {
 	},
 };
 
-// Secret keys
-const SECRETS = {
-	PROVIDER: "S3UP_PROVIDER",
-	ACCESS_KEY_ID: "S3UP_ACCESS_KEY_ID",
-	SECRET_ACCESS_KEY: "S3UP_SECRET_ACCESS_KEY",
-	BUCKET: "S3UP_BUCKET",
-	PUBLIC_URL_BASE: "S3UP_PUBLIC_URL_BASE",
-	REGION: "S3UP_REGION",
-	ACCOUNT_ID: "S3UP_ACCOUNT_ID",
-	ENDPOINT: "S3UP_ENDPOINT",
-} as const;
-
-export { SECRETS };
-
 export interface S3Config {
 	provider: Provider;
 	accessKeyId: string;
@@ -123,79 +113,45 @@ export function getEndpoint(config: S3Config): string {
 }
 
 /**
- * Load config from secrets/environment
+ * Load config from secrets/environment (single keychain prompt)
  */
 export async function loadConfig(): Promise<S3Config | null> {
-	const [
-		provider,
-		accessKeyId,
-		secretAccessKey,
-		bucket,
-		publicUrlBase,
-		region,
-		accountId,
-		endpoint,
-	] = await Promise.all([
-		getSecret(SECRETS.PROVIDER),
-		getSecret(SECRETS.ACCESS_KEY_ID),
-		getSecret(SECRETS.SECRET_ACCESS_KEY),
-		getSecret(SECRETS.BUCKET),
-		getSecret(SECRETS.PUBLIC_URL_BASE),
-		getSecret(SECRETS.REGION),
-		getSecret(SECRETS.ACCOUNT_ID),
-		getSecret(SECRETS.ENDPOINT),
-	]);
-
-	if (
-		!provider ||
-		!accessKeyId ||
-		!secretAccessKey ||
-		!bucket ||
-		!publicUrlBase
-	) {
+	const json = await getConfigSecret();
+	if (!json) {
 		return null;
 	}
 
-	return {
-		provider: provider as Provider,
-		accessKeyId,
-		secretAccessKey,
-		bucket,
-		publicUrlBase,
-		region: region ?? undefined,
-		accountId: accountId ?? undefined,
-		endpoint: endpoint ?? undefined,
-	};
+	try {
+		const config = JSON.parse(json) as S3Config;
+
+		// Validate required fields
+		if (
+			!config.provider ||
+			!config.accessKeyId ||
+			!config.secretAccessKey ||
+			!config.bucket ||
+			!config.publicUrlBase
+		) {
+			return null;
+		}
+
+		return config;
+	} catch {
+		return null;
+	}
 }
 
 /**
- * Save config to secrets
+ * Save config to secrets (single keychain entry)
  */
 export async function saveConfig(config: S3Config): Promise<void> {
-	await Promise.all([
-		setSecret(SECRETS.PROVIDER, config.provider),
-		setSecret(SECRETS.ACCESS_KEY_ID, config.accessKeyId),
-		setSecret(SECRETS.SECRET_ACCESS_KEY, config.secretAccessKey),
-		setSecret(SECRETS.BUCKET, config.bucket),
-		setSecret(SECRETS.PUBLIC_URL_BASE, config.publicUrlBase),
-		config.region
-			? setSecret(SECRETS.REGION, config.region)
-			: Promise.resolve(),
-		config.accountId
-			? setSecret(SECRETS.ACCOUNT_ID, config.accountId)
-			: Promise.resolve(),
-		config.endpoint
-			? setSecret(SECRETS.ENDPOINT, config.endpoint)
-			: Promise.resolve(),
-	]);
+	await setConfigSecret(JSON.stringify(config));
 }
 
 /**
  * Delete all stored config
  */
 export async function deleteConfig(): Promise<number> {
-	const results = await Promise.all(
-		Object.values(SECRETS).map((key) => deleteSecret(key)),
-	);
-	return results.filter(Boolean).length;
+	const deleted = await deleteConfigSecret();
+	return deleted ? 1 : 0;
 }

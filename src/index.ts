@@ -50,6 +50,7 @@ export type SpeedPreset = keyof typeof SPEED_PRESETS;
 export interface UploadOptions {
 	chunkSize: number;
 	connections: number;
+	forceFast?: boolean;
 }
 
 function parseFlags(args: string[]): {
@@ -70,7 +71,7 @@ function getUploadOptions(flags: {
 	fast: boolean;
 	slow: boolean;
 }): UploadOptions {
-	if (flags.fast) return SPEED_PRESETS.fast;
+	if (flags.fast) return { ...SPEED_PRESETS.fast, forceFast: true };
 	if (flags.slow) return SPEED_PRESETS.slow;
 	return SPEED_PRESETS.default;
 }
@@ -196,8 +197,10 @@ async function uploadFiles(
 	}
 
 	// Separate large and small files
-	const largeFiles = validFiles.filter((f) => f.size >= MULTIPART_THRESHOLD);
-	const smallFiles = validFiles.filter((f) => f.size < MULTIPART_THRESHOLD);
+	// In fast mode, use chunk size as threshold to force parallel uploads
+	const threshold = options.forceFast ? options.chunkSize : MULTIPART_THRESHOLD;
+	const largeFiles = validFiles.filter((f) => f.size >= threshold);
+	const smallFiles = validFiles.filter((f) => f.size < threshold);
 
 	const totalSize = validFiles.reduce((sum, f) => sum + f.size, 0);
 	p.intro(

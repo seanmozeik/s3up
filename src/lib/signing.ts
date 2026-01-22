@@ -53,7 +53,7 @@ function getSigningKey(
  * Format date for AWS (YYYYMMDD'T'HHMMSS'Z')
  */
 function toAmzDate(date: Date): string {
-	return date.toISOString().replace(/[:-]|\\.\\d{3}/g, "");
+	return date.toISOString().replace(/[:-]|\.\d{3}/g, "");
 }
 
 /**

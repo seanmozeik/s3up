@@ -115,12 +115,11 @@ async function uploadPart(
 	const url = `${endpoint}/${config.bucket}/${encodeURIComponent(key)}?partNumber=${partNumber}&uploadId=${encodeURIComponent(uploadId)}`;
 	const credentials = getCredentials(config);
 
+	// Include content-type for R2 compatibility
 	const signed = signRequest(
 		"PUT",
 		url,
-		{
-			"content-length": String(body.length),
-		},
+		{ "content-type": "application/octet-stream" },
 		body,
 		credentials,
 	);
@@ -128,7 +127,7 @@ async function uploadPart(
 	const response = await fetch(signed.url, {
 		method: signed.method,
 		headers: signed.headers,
-		body,
+		body: Buffer.from(body),
 		signal,
 	});
 
@@ -458,6 +457,9 @@ export async function uploadMultipart(
 
 		// Setup abort handler
 		setupAbortHandler(filePath, state);
+
+		// Show initial progress bar
+		writeProgress(progress);
 
 		// Upload all parts
 		const allParts = await uploadPartsInParallel(
