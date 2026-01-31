@@ -11,7 +11,7 @@ bun build ./src/index.ts --outdir dist --target=bun --bytecode --minify
 bun build ./src/index.ts --compile --target=bun-windows-x64 --bytecode --outfile dist/s3up-windows-x64.exe --minify
 
 # Clean up bun build artifacts
-rm -f ./.*.bun-build
+rm -f ./.*bun-build
 
 # Create source tarball with bundled files (exclude binaries and archives)
 VERSION=$(bun -p "require('./package.json').version") && \
