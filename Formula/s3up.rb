@@ -1,12 +1,12 @@
 class S3up < Formula
   desc "Fast CLI tool for uploading files to S3-compatible storage"
   homepage "https://github.com/seanmozeik/s3up"
-  version "0.3.0"
+  version "0.3.1"
   license "MIT"
 
   # URL to bundled source (single JS file)
   url "https://github.com/seanmozeik/s3up/releases/download/v#{version}/s3up-#{version}.tar.gz"
-  sha256 "1a6d7f6d094963399f4274c98339a2debdcc6089508706e7fab537b2ea58d882"
+  sha256 "3b448e8f2f4b1c6ae032869651d7eab0ac6faedfd94b31037c22332b84cec735"
 
   depends_on "oven-sh/bun/bun"
 
