@@ -3,9 +3,9 @@
 import { dirname, join } from 'node:path';
 import figlet from 'figlet';
 import gradient from 'gradient-string';
-// Embed font file for Bun standalone executable
+// Embed font file — vendored so it works in dev, compiled binary, and npm installs
 // @ts-expect-error - Bun-specific import attribute
-import fontPath from '../../node_modules/figlet/fonts/Slant.flf' with { type: 'file' };
+import fontPath from './Slant.flf' with { type: 'file' };
 import { gradientColors } from './theme.js';
 
 // Create custom gradient using Catppuccin Frappe colors
