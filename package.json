@@ -1,6 +1,6 @@
 {
   "name": "@seanmozeik/s3up",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Upload files to S3-compatible storage",
   "type": "module",
   "bin": {
